@@ -1,10 +1,19 @@
 <script setup>
-// 工具模块：全屏展示系统内置小工具入口（后续新增工具只需在此数组追加一项）
+import { computed } from 'vue'
+
+// 工具模块：全屏展示系统内置小工具入口（后续新增工具只需在 tools 数组追加一项）
+const props = defineProps({
+  newsEnabled: { type: Boolean, default: false }
+})
 const emit = defineEmits(['back', 'select-tool'])
 
-const tools = [
-  { id: 'pomodoro', icon: '🍅', name: '番茄钟', desc: '专注 / 休息计时器，可自定义时长' }
-]
+const tools = computed(() => [
+  { id: 'pomodoro', icon: '🍅', name: '番茄钟', desc: '专注 / 休息计时器，可自定义时长' },
+  { id: 'heatmap', icon: '📅', name: '日历热力图', desc: '按日期查看打卡与专注活跃度' },
+  props.newsEnabled
+    ? { id: 'news', icon: '📰', name: '查看新闻', desc: '今日热搜新闻' }
+    : { id: 'news', icon: '📰', name: '查看新闻', desc: '请先保存今日打卡后再查看', locked: true }
+])
 </script>
 
 <template>
@@ -26,12 +35,15 @@ const tools = [
         <button
           v-for="tool in tools"
           :key="tool.id"
-          class="group flex flex-col items-center gap-3 rounded-2xl border border-oat-200 bg-white p-8 shadow-sm transition hover:-translate-y-0.5 hover:border-calm/50 hover:shadow-md"
-          @click="emit('select-tool', tool.id)"
+          :disabled="!!tool.locked"
+          class="group flex flex-col items-center gap-3 rounded-2xl border border-oat-200 bg-white p-8 shadow-sm transition hover:-translate-y-0.5 hover:border-calm/50 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:border-oat-200 disabled:hover:shadow-sm"
+          @click="!tool.locked && emit('select-tool', tool.id)"
         >
           <span class="text-5xl transition group-hover:scale-110">{{ tool.icon }}</span>
           <span class="text-base font-medium text-ink">{{ tool.name }}</span>
-          <span class="text-center text-xs leading-relaxed text-ink/50">{{ tool.desc }}</span>
+          <span class="text-center text-xs leading-relaxed text-ink/50">
+            {{ tool.locked ? '🔒 ' + tool.desc : tool.desc }}
+          </span>
         </button>
       </div>
     </main>

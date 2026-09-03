@@ -2,6 +2,9 @@
 import { ref, reactive, computed, watch, onMounted, toRaw } from 'vue'
 import ToolsView from './components/ToolsView.vue'
 import PomodoroView from './components/PomodoroView.vue'
+import StatsView from './components/StatsView.vue'
+import HeatmapView from './components/HeatmapView.vue'
+import NewsView from './components/NewsView.vue'
 
 // ---------- 日期工具 ----------
 const pad = (n) => String(n).padStart(2, '0')
@@ -25,10 +28,6 @@ const motto = ref('')
 const mottoDraft = ref('')
 const savedTip = ref(false)
 const saveError = ref(false)
-const showNews = ref(false)
-const newsLoading = ref(false)
-const newsError = ref('')
-const newsData = ref(null)
 let savedTipTimer = null
 
 // ---------- 设置（模块化） ----------
@@ -45,7 +44,7 @@ const apiKeySaved = ref(false)
 let apiKeySavedTimer = null
 
 // ---------- 工具模块 / 番茄钟 ----------
-const currentView = ref('main') // 'main' | 'tools' | 'pomodoro'
+const currentView = ref('main') // 'main' | 'tools' | 'pomodoro' | 'heatmap' | 'news' | 'stats'
 const pomodoro = reactive({}) // { [date]: { sessions, seconds } }
 const pomodoroSettings = reactive({ focusMinutes: 25, restMinutes: 5 })
 
@@ -130,6 +129,17 @@ function backToMain() {
 
 function openTool(id) {
   if (id === 'pomodoro') currentView.value = 'pomodoro'
+  else if (id === 'heatmap') currentView.value = 'heatmap'
+  else if (id === 'news') currentView.value = 'news'
+}
+
+function backToTools() {
+  currentView.value = 'tools'
+}
+
+function openStats() {
+  showHistory.value = false
+  currentView.value = 'stats'
 }
 
 // 番茄钟：记录一次专注学习（累计次数与秒数，按天归档）
@@ -274,40 +284,6 @@ async function saveMotto() {
   }
 }
 
-async function openNews() {
-  if (!hasSavedToday.value) return
-  showNews.value = true
-  newsData.value = null
-  newsError.value = ''
-  await loadNews()
-}
-
-async function loadNews() {
-  newsLoading.value = true
-  newsError.value = ''
-  try {
-    const result = await window.api.fetchNews()
-    if (result && result.ok) {
-      newsData.value = { top: result.top || [], hot: result.hot || [] }
-    } else {
-      newsError.value = (result && result.error) || '新闻加载失败，请稍后重试'
-    }
-  } catch (err) {
-    console.error('新闻加载失败:', err)
-    newsError.value = '新闻加载失败，请检查网络后重试'
-  } finally {
-    newsLoading.value = false
-  }
-}
-
-function closeNews() {
-  showNews.value = false
-}
-
-function openLink(url) {
-  if (url) window.api.openExternal(url)
-}
-
 // 编辑今日时实时同步草稿，避免切换到历史再切回来时丢失未保存内容
 watch([completed, plan], () => {
   if (isToday.value) {
@@ -435,15 +411,6 @@ onMounted(async () => {
       <div class="mt-auto">
         <div class="flex items-center gap-4">
           <button class="history-btn" @click="showHistory = true">📜 查看历史记录</button>
-          <button
-            class="history-btn"
-            :disabled="!hasSavedToday"
-            :title="hasSavedToday ? '查看今日热搜新闻' : '请先保存今日打卡'"
-            :class="{ 'cursor-not-allowed opacity-40': !hasSavedToday }"
-            @click="openNews"
-          >
-            📰 查看新闻
-          </button>
           <button v-if="canEdit" class="save-btn" @click="saveToday">💾 保存今日打卡</button>
           <button v-else class="save-btn save-btn-disabled" disabled>💾 保存今日打卡</button>
         </div>
@@ -467,12 +434,15 @@ onMounted(async () => {
       <div class="flex max-h-[80%] w-full max-w-2xl flex-col rounded-2xl bg-white p-6 shadow-2xl">
         <div class="mb-4 flex items-center justify-between">
           <h3 class="text-xl font-semibold">📜 历史记录</h3>
-          <button
-            class="text-2xl leading-none text-ink/50 transition hover:text-ink"
-            @click="showHistory = false"
-          >
-            ×
-          </button>
+          <div class="flex items-center gap-2">
+            <button class="nav-btn-primary" @click="openStats">📊 统计</button>
+            <button
+              class="text-2xl leading-none text-ink/50 transition hover:text-ink"
+              @click="showHistory = false"
+            >
+              ×
+            </button>
+          </div>
         </div>
 
         <p v-if="sortedDates.length === 0" class="py-10 text-center text-ink/50">
@@ -626,97 +596,41 @@ onMounted(async () => {
       </div>
     </div>
 
-    <!-- 新闻弹窗 -->
-    <div
-      v-if="showNews"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6"
-      @click.self="closeNews"
-    >
-      <div class="flex max-h-[85%] w-full max-w-2xl flex-col rounded-2xl bg-white p-6 shadow-2xl">
-        <div class="mb-4 flex items-center justify-between">
-          <h3 class="text-xl font-semibold">📰 今日新闻</h3>
-          <button
-            class="text-2xl leading-none text-ink/50 transition hover:text-ink"
-            @click="closeNews"
-          >
-            ×
-          </button>
-        </div>
-
-        <div
-          v-if="newsLoading"
-          class="flex flex-col items-center justify-center gap-3 py-16 text-ink/50"
-        >
-          <div class="h-8 w-8 animate-spin rounded-full border-2 border-calm border-t-transparent"></div>
-          <p class="text-sm">正在加载新闻…</p>
-        </div>
-
-        <div v-else-if="newsError" class="flex flex-col items-center gap-4 py-16 text-center">
-          <p class="text-4xl">😢</p>
-          <p class="text-sm text-ink/70">{{ newsError }}</p>
-          <button class="nav-btn-primary" @click="loadNews">🔄 重试</button>
-        </div>
-
-        <div v-else-if="newsData" class="flex flex-col gap-4 overflow-y-auto pr-1">
-          <div
-            v-if="newsData.top.length"
-            class="rounded-xl border border-calm/30 bg-calm/10 p-4"
-          >
-            <h4 class="mb-2 text-sm font-medium text-calm">🔝 置顶新闻</h4>
-            <ul class="flex flex-col gap-2">
-              <li v-for="(item, i) in newsData.top" :key="'top' + i">
-                <a
-                  href="#"
-                  class="text-sm text-ink/80 transition hover:text-calm hover:underline"
-                  @click.prevent="openLink(item.link)"
-                >
-                  {{ item.top }}
-                </a>
-              </li>
-            </ul>
-          </div>
-
-          <div>
-            <h4 class="mb-2 text-sm font-medium text-ink/60">🔥 全网热搜</h4>
-            <ul class="flex flex-col gap-1">
-              <li
-                v-for="(item, i) in newsData.hot"
-                :key="'hot' + i"
-                class="flex items-baseline gap-2"
-              >
-                <span
-                  class="w-6 shrink-0 text-right text-xs font-semibold"
-                  :class="i < 3 ? 'text-red-500' : 'text-ink/40'"
-                >
-                  {{ i + 1 }}
-                </span>
-                <a
-                  href="#"
-                  class="text-sm text-ink/80 transition hover:text-calm hover:underline"
-                  @click.prevent="openLink(item.link)"
-                >
-                  {{ item.hot_research }}
-                </a>
-              </li>
-            </ul>
-          </div>
-        </div>
-
-        <p v-else class="py-16 text-center text-ink/50">暂无新闻</p>
-      </div>
-    </div>
-
     <!-- 工具模块（全屏覆盖） -->
-    <ToolsView v-if="currentView === 'tools'" @back="backToMain" @select-tool="openTool" />
+    <ToolsView
+      v-if="currentView === 'tools'"
+      :news-enabled="hasSavedToday"
+      @back="backToMain"
+      @select-tool="openTool"
+    />
 
     <!-- 番茄钟（全屏覆盖） -->
     <PomodoroView
       v-else-if="currentView === 'pomodoro'"
       :focus-minutes="pomodoroSettings.focusMinutes"
       :rest-minutes="pomodoroSettings.restMinutes"
-      @back="backToMain"
+      @back="backToTools"
       @complete-focus="recordFocusSession"
       @update-settings="savePomodoroSettings"
+    />
+
+    <!-- 日历热力图（全屏覆盖） -->
+    <HeatmapView
+      v-else-if="currentView === 'heatmap'"
+      :records="records"
+      :pomodoro="pomodoro"
+      @back="backToTools"
+    />
+
+    <!-- 查看新闻（全屏覆盖，从工具菜单进入） -->
+    <NewsView v-else-if="currentView === 'news'" @back="backToTools" />
+
+    <!-- 学习统计仪表盘（全屏覆盖，从历史记录进入） -->
+    <StatsView
+      v-else-if="currentView === 'stats'"
+      :records="records"
+      :pomodoro="pomodoro"
+      @back="backToMain"
     />
   </div>
 </template>
