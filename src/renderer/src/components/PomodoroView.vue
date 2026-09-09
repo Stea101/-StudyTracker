@@ -4,6 +4,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 // 番茄钟：专注 / 休息计时器。
 // 规则：计时不会自动暂停；时间到只提示不停止；手动暂停后自动进入另一阶段；
 // 专注阶段结束时向上抛 elapsed 秒数用于统计；休息阶段可选择退出。
+// 计时基于真实时间戳（Date.now()）计算：即使窗口最小化/后台被浏览器节流，
+// 也不会出现“计时变慢”的问题；定时器只负责刷新界面显示。
 const props = defineProps({
   focusMinutes: { type: Number, default: 25 },
   restMinutes: { type: Number, default: 5 }
@@ -12,11 +14,18 @@ const emit = defineEmits(['back', 'complete-focus', 'update-settings'])
 
 const phase = ref('focus') // 'focus' | 'rest'
 const running = ref(false) // false = 未开始；true = 计时中（持续到退出）
-const elapsed = ref(0) // 当前阶段已过秒数（只增不减）
+const startedAt = ref(0) // 当前阶段开始时刻（毫秒时间戳）
+const nowTick = ref(0) // 用于触发界面刷新的“当前时刻”
 const focusDraft = ref(props.focusMinutes)
 const restDraft = ref(props.restMinutes)
 
 let timer = null
+
+// 当前阶段已过秒数：由真实时间戳计算，后台/最小化期间也不会丢时间
+const elapsed = computed(() => {
+  if (!running.value || !startedAt.value) return 0
+  return Math.max(0, Math.floor((nowTick.value - startedAt.value) / 1000))
+})
 
 const durationSeconds = computed(() =>
   phase.value === 'focus' ? focusDraft.value * 60 : restDraft.value * 60
@@ -43,11 +52,18 @@ const promptText = computed(() => {
   return phase.value === 'focus' ? '🎉 专注时间到，该休息啦！' : '📖 休息时间到，该学习啦！'
 })
 
+function updateNow() {
+  nowTick.value = Date.now()
+}
+
+// 窗口重新可见 / 获得焦点时立即校准，避免节流期间显示滞后
+function syncNow() {
+  if (running.value) updateNow()
+}
+
 function ensureTimer() {
   if (timer) return
-  timer = setInterval(() => {
-    if (running.value) elapsed.value += 1
-  }, 1000)
+  timer = setInterval(updateNow, 250)
 }
 
 function incFocus() {
@@ -63,17 +79,22 @@ function decRest() {
   if (!running.value) restDraft.value = Math.max(1, restDraft.value - 1)
 }
 
+function markPhaseStart() {
+  startedAt.value = Date.now()
+  nowTick.value = startedAt.value
+}
+
 function startCycle() {
   emit('update-settings', { focusMinutes: focusDraft.value, restMinutes: restDraft.value })
   phase.value = 'focus'
-  elapsed.value = 0
   running.value = true
+  markPhaseStart()
   ensureTimer()
 }
 
 function switchTo(next) {
   phase.value = next
-  elapsed.value = 0
+  markPhaseStart()
 }
 
 // 手动暂停专注 → 记录本次专注时长，并自动开始休息
@@ -91,9 +112,16 @@ function exit() {
   emit('back')
 }
 
-onMounted(ensureTimer)
+onMounted(() => {
+  ensureTimer()
+  document.addEventListener('visibilitychange', syncNow)
+  window.addEventListener('focus', syncNow)
+})
+
 onUnmounted(() => {
   if (timer) clearInterval(timer)
+  document.removeEventListener('visibilitychange', syncNow)
+  window.removeEventListener('focus', syncNow)
 })
 </script>
 
