@@ -2,6 +2,8 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { join } from 'path'
 import { promises as fs } from 'fs'
 import { request as httpsRequest } from 'https'
+import { execFile } from 'child_process'
+import { release as osRelease } from 'os'
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto'
 
 // 数据固定存放在用户文档目录：~/Documents/StudyTracker/data.json
@@ -311,6 +313,88 @@ async function fetchHotNews() {
   }
 }
 
+// ---------- 问题反馈（拉取系统默认邮件客户端） ----------
+// 开发者邮箱：反馈邮件的收件人，同时作为拉起失败时展示给用户的兜底信息
+const FEEDBACK_EMAIL = 'dev@example.com'
+
+function pad2(n) {
+  return String(n).padStart(2, '0')
+}
+
+// 检测系统是否注册了 mailto 协议处理器。
+// 未注册时 shell.openExternal 在 Windows 上不一定报错（可能只弹出「你要如何打开？」选择框），
+// 因此这里先查注册表预检，好给用户一个明确的失败提示。
+function hasMailtoHandler() {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32') return resolve(true)
+    execFile(
+      'reg.exe',
+      ['query', 'HKCR\\mailto\\shell\\open\\command'],
+      { windowsHide: true, timeout: 5000 },
+      (err, stdout) => {
+        if (err) return resolve(false)
+        resolve(typeof stdout === 'string' && /REG_(SZ|EXPAND_SZ)/i.test(stdout))
+      }
+    )
+  })
+}
+
+function withTimeout(promise, ms, message) {
+  let timer = null
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms)
+    })
+  ])
+}
+
+// 邮件正文：用户填写的内容 + 应用版本 / 系统环境（便于定位问题）
+function composeFeedbackBody(content) {
+  const now = new Date()
+  const stamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}`
+  const text = typeof content === 'string' ? content.trim() : ''
+  return [
+    text || '（请在这里描述你发现的问题或建议）',
+    '',
+    '------------------------------',
+    `应用版本：${app.getVersion()}`,
+    `系统环境：${process.platform === 'win32' ? 'Windows' : process.platform} ${osRelease()} (${process.arch})`,
+    `反馈时间：${stamp}`
+  ].join('\r\n')
+}
+
+// mailto 链接：收件人 + 主题 + 正文（正文换行统一为 CRLF，兼容各邮件客户端）
+function buildMailtoUrl(to, subject, body) {
+  const parts = []
+  if (subject) parts.push(`subject=${encodeURIComponent(subject)}`)
+  if (body) parts.push(`body=${encodeURIComponent(body)}`)
+  return `mailto:${to}${parts.length ? `?${parts.join('&')}` : ''}`
+}
+
+async function openFeedbackMail(payload) {
+  const raw = payload && typeof payload.content === 'string' ? payload.content : ''
+  const content = raw.slice(0, 4000)
+  const body = composeFeedbackBody(content)
+  const url = buildMailtoUrl(FEEDBACK_EMAIL, '【极简学习打卡器】问题反馈', body)
+
+  if (!(await hasMailtoHandler())) {
+    return { ok: false, reason: 'no-mail-client', email: FEEDBACK_EMAIL, body }
+  }
+  try {
+    await withTimeout(shell.openExternal(url), 8000, '拉起邮件客户端超时')
+    return { ok: true, email: FEEDBACK_EMAIL, body }
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'open-failed',
+      error: (err && err.message) || '未知错误',
+      email: FEEDBACK_EMAIL,
+      body
+    }
+  }
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 900,
@@ -370,6 +454,9 @@ app.whenReady().then(() => {
     await writeData({ newsApiKeyEnc })
     return { ok: true, masked: maskApiKey(trimmed) }
   })
+
+  // 设置 → 问题反馈：一键拉起系统默认邮件客户端，收件人预填开发者邮箱
+  ipcMain.handle('feedback:openMail', (_event, payload) => openFeedbackMail(payload))
 
   createWindow()
 

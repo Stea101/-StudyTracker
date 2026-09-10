@@ -7,7 +7,8 @@ const api = {
   fetchNews: () => ipcRenderer.invoke('news:fetch'),
   openExternal: (url) => ipcRenderer.invoke('news:open', url),
   getApiKey: () => ipcRenderer.invoke('settings:getApiKey'),
-  saveApiKey: (key) => ipcRenderer.invoke('settings:saveApiKey', key)
+  saveApiKey: (key) => ipcRenderer.invoke('settings:saveApiKey', key),
+  openFeedbackMail: (payload) => ipcRenderer.invoke('feedback:openMail', payload)
 }
 
 contextBridge.exposeInMainWorld('api', api)

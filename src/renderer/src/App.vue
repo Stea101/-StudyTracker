@@ -27,10 +27,11 @@ const saveError = ref(false)
 let savedTipTimer = null
 
 // ---------- 设置（模块化） ----------
-const settingsView = ref('menu') // 'menu' | 'motto' | 'apiKey'
+const settingsView = ref('menu') // 'menu' | 'motto' | 'apiKey' | 'feedback'
 const settingOptions = [
   { id: 'motto', icon: '💬', label: '座右铭', desc: '设置显示在窗口顶部的激励语' },
-  { id: 'apiKey', icon: '🔑', label: '新闻 API 密钥', desc: '查看或修改新闻接口密钥' }
+  { id: 'apiKey', icon: '🔑', label: '新闻 API 密钥', desc: '查看或修改新闻接口密钥' },
+  { id: 'feedback', icon: '✉️', label: '问题反馈', desc: '把问题或建议一键发送给开发者' }
 ]
 const apiKeyMasked = ref('')
 const showApiKeyEdit = ref(false)
@@ -38,6 +39,16 @@ const apiKeyDraft = ref('')
 const apiKeyError = ref('')
 const apiKeySaved = ref(false)
 let apiKeySavedTimer = null
+
+// ---------- 设置 · 问题反馈 ----------
+const FEEDBACK_EMAIL = 'dev@example.com'
+const feedbackContent = ref('')
+const feedbackSending = ref(false)
+const feedbackSent = ref(false)
+const feedbackFailure = ref(null) // { reason, error, email, body }
+const feedbackCopied = ref('') // 'email' | 'body' | ''
+let feedbackSentTimer = null
+let feedbackCopiedTimer = null
 
 // ---------- 工具模块 / 番茄钟 ----------
 const currentView = ref('main') // 'main' | 'tools' | 'pomodoro' | 'heatmap' | 'news' | 'decision' | 'stats' | 'checkin'
@@ -286,6 +297,87 @@ async function openSettingOption(id) {
     apiKeyError.value = ''
     apiKeySaved.value = false
     await loadApiKey()
+  } else if (id === 'feedback') {
+    settingsView.value = 'feedback'
+    feedbackSending.value = false
+    feedbackSent.value = false
+    feedbackFailure.value = null
+    feedbackCopied.value = ''
+  }
+}
+
+// ---------- 问题反馈 ----------
+// 复制文本：优先使用 clipboard API，file:// 等场景下回退到 execCommand
+async function copyText(text, tag) {
+  let ok = false
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text)
+      ok = true
+    }
+  } catch {
+    ok = false
+  }
+  if (!ok) {
+    const el = document.createElement('textarea')
+    el.value = text
+    el.setAttribute('readonly', '')
+    el.style.position = 'fixed'
+    el.style.top = '-1000px'
+    el.style.opacity = '0'
+    document.body.appendChild(el)
+    el.select()
+    try {
+      ok = document.execCommand('copy')
+    } catch {
+      ok = false
+    }
+    document.body.removeChild(el)
+  }
+  feedbackCopied.value = ok ? tag : ''
+  if (ok) {
+    clearTimeout(feedbackCopiedTimer)
+    feedbackCopiedTimer = setTimeout(() => (feedbackCopied.value = ''), 2000)
+  }
+  return ok
+}
+
+function closeFeedbackFailure() {
+  feedbackFailure.value = null
+  feedbackCopied.value = ''
+}
+
+// 一键拉起本机默认邮件客户端；失败时把邮箱抛给界面，提示用户手动发送
+async function sendFeedback() {
+  if (feedbackSending.value) return
+  feedbackSending.value = true
+  feedbackSent.value = false
+  feedbackFailure.value = null
+  feedbackCopied.value = ''
+  try {
+    const result = await window.api.openFeedbackMail({ content: feedbackContent.value })
+    if (result && result.ok) {
+      feedbackSent.value = true
+      clearTimeout(feedbackSentTimer)
+      feedbackSentTimer = setTimeout(() => (feedbackSent.value = false), 5000)
+    } else {
+      feedbackFailure.value = {
+        reason: (result && result.reason) || 'open-failed',
+        error: (result && result.error) || '',
+        email: (result && result.email) || FEEDBACK_EMAIL,
+        body: (result && result.body) || feedbackContent.value
+      }
+    }
+  } catch (err) {
+    console.error('拉起邮件客户端失败:', err)
+    feedbackFailure.value = {
+      reason: 'open-failed',
+      error: (err && err.message) || '',
+      email: FEEDBACK_EMAIL,
+      body: feedbackContent.value
+    }
+  } finally {
+    feedbackSending.value = false
   }
 }
 
@@ -400,6 +492,8 @@ onUnmounted(() => {
   clearTimeout(apiKeySavedTimer)
   clearTimeout(checkinTipTimer)
   clearTimeout(checkinErrorTimer)
+  clearTimeout(feedbackSentTimer)
+  clearTimeout(feedbackCopiedTimer)
 })
 </script>
 
@@ -694,6 +788,102 @@ onUnmounted(() => {
             </div>
           </div>
         </template>
+
+        <!-- 问题反馈子页 -->
+        <template v-else-if="settingsView === 'feedback'">
+          <div class="mb-4 flex items-center gap-3">
+            <button class="nav-btn shrink-0" @click="backToSettingsMenu">← 返回</button>
+            <h3 class="flex-1 text-center text-xl font-semibold">✉️ 问题反馈</h3>
+            <button
+              class="shrink-0 text-2xl leading-none text-ink/50 transition hover:text-ink"
+              @click="closeSettings"
+            >
+              ×
+            </button>
+          </div>
+
+          <p class="mb-3 text-sm leading-relaxed text-ink/70">
+            把你在使用中发现的问题或建议写下来，点击下面的按钮会拉起本机默认的邮件软件，收件人已自动填好，确认内容后直接发送即可。
+          </p>
+
+          <div class="mb-3 rounded-xl border border-oat-200 bg-oat-50 px-4 py-3">
+            <p class="mb-1 text-xs text-ink/50">收件人（开发者邮箱）</p>
+            <p class="select-text break-all font-mono text-base text-ink">{{ FEEDBACK_EMAIL }}</p>
+          </div>
+
+          <textarea
+            v-model="feedbackContent"
+            class="textarea h-40 select-text"
+            maxlength="2000"
+            placeholder="例如：在首页一键打卡时，如果……希望能……"
+          ></textarea>
+          <p class="mt-1 flex items-center justify-between text-xs text-ink/50">
+            <span>邮件会自动附带应用版本与系统信息，方便定位问题。</span>
+            <span>{{ feedbackContent.length }}/2000</span>
+          </p>
+
+          <p v-if="feedbackSent" class="mt-3 text-sm text-emerald-600">
+            ✓ 已拉起邮件客户端，请在邮件中确认内容并点击发送
+          </p>
+
+          <div class="mt-4 flex items-center gap-3">
+            <button
+              class="save-btn"
+              :disabled="feedbackSending"
+              :class="{ 'cursor-not-allowed opacity-60': feedbackSending }"
+              @click="sendFeedback"
+            >
+              {{ feedbackSending ? '正在拉起邮件客户端…' : '📧 一键发送反馈' }}
+            </button>
+            <button class="history-btn" @click="backToSettingsMenu">关闭</button>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- 问题反馈：拉起邮件客户端失败时的提示窗口（把邮箱显示给用户，提示手动发送） -->
+    <div
+      v-if="feedbackFailure"
+      class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-6"
+      @click.self="closeFeedbackFailure"
+    >
+      <div class="max-h-[85%] w-full max-w-md overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
+        <h3 class="mb-2 text-lg font-semibold text-red-500">⚠️ 无法打开邮件软件</h3>
+        <p class="mb-4 text-sm leading-relaxed text-ink/70">
+          {{
+            feedbackFailure.reason === 'no-mail-client'
+              ? '没有检测到本机已安装并注册的邮件客户端。'
+              : '拉起邮件客户端失败。'
+          }}请手动把问题或建议发送到下面的开发者邮箱：
+        </p>
+
+        <div class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+          <p class="mb-1 text-xs text-ink/50">开发者邮箱</p>
+          <p class="select-text break-all font-mono text-xl text-ink">{{ feedbackFailure.email }}</p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <button class="nav-btn-primary" @click="copyText(feedbackFailure.email, 'email')">
+            {{ feedbackCopied === 'email' ? '✓ 已复制' : '📋 复制邮箱地址' }}
+          </button>
+          <button class="history-btn" @click="copyText(feedbackFailure.body, 'body')">
+            {{ feedbackCopied === 'body' ? '✓ 已复制' : '📋 复制邮件内容' }}
+          </button>
+          <button class="history-btn" :disabled="feedbackSending" @click="sendFeedback">
+            🔄 重试
+          </button>
+        </div>
+
+        <p v-if="feedbackFailure.error" class="mt-3 text-xs text-ink/40">
+          失败原因：{{ feedbackFailure.error }}
+        </p>
+        <p class="mt-3 text-xs leading-relaxed text-ink/50">
+          提示：你可以复制上面的邮箱地址，然后用任意邮箱（网页版邮箱、手机邮箱 App 等）自行发送建议给开发者。
+        </p>
+
+        <div class="mt-4 flex">
+          <button class="save-btn" @click="closeFeedbackFailure">知道了</button>
+        </div>
       </div>
     </div>
 
