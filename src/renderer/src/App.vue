@@ -1,18 +1,14 @@
 <script setup>
-import { ref, reactive, computed, watch, onMounted, toRaw } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, toRaw } from 'vue'
 import ToolsView from './components/ToolsView.vue'
 import PomodoroView from './components/PomodoroView.vue'
 import StatsView from './components/StatsView.vue'
 import HeatmapView from './components/HeatmapView.vue'
 import NewsView from './components/NewsView.vue'
-
-// ---------- 日期工具 ----------
-const pad = (n) => String(n).padStart(2, '0')
-const formatDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-const parseDate = (str) => {
-  const [y, m, d] = str.split('-').map(Number)
-  return new Date(y, m - 1, d)
-}
+import DecisionView from './components/DecisionView.vue'
+import CheckinView from './components/CheckinView.vue'
+import CheckinToday from './components/CheckinToday.vue'
+import { pad, fmtDate as formatDate, parseDate } from './lib/date'
 
 const todayStr = formatDate(new Date())
 
@@ -44,9 +40,23 @@ const apiKeySaved = ref(false)
 let apiKeySavedTimer = null
 
 // ---------- 工具模块 / 番茄钟 ----------
-const currentView = ref('main') // 'main' | 'tools' | 'pomodoro' | 'heatmap' | 'news' | 'stats'
+const currentView = ref('main') // 'main' | 'tools' | 'pomodoro' | 'heatmap' | 'news' | 'decision' | 'stats' | 'checkin'
 const pomodoro = reactive({}) // { [date]: { sessions, seconds } }
 const pomodoroSettings = reactive({ focusMinutes: 25, restMinutes: 5 })
+
+// ---------- 打卡计划 ----------
+const checkinPlans = ref([]) // [{ id, name, repeat, customDays, startDate, endDate, slots[] }]
+const checkinLogs = reactive({}) // { [planId]: { [date]: { [slotId]: { at, ts } } } }
+const checkinTip = ref('')
+const checkinError = ref('')
+let checkinTipTimer = null
+let checkinErrorTimer = null
+
+// 每秒走动的时钟：让首页「一键打卡」按打卡时段实时切换状态与倒计时。
+// 打卡相关逻辑统一以 todayKey 为准（跨零点后自动进入新的一天）。
+const now = ref(new Date())
+const todayKey = computed(() => formatDate(now.value))
+let clockTimer = null
 
 // ---------- 计算属性 ----------
 const isToday = computed(() => selectedDate.value === todayStr)
@@ -131,6 +141,8 @@ function openTool(id) {
   if (id === 'pomodoro') currentView.value = 'pomodoro'
   else if (id === 'heatmap') currentView.value = 'heatmap'
   else if (id === 'news') currentView.value = 'news'
+  else if (id === 'decision') currentView.value = 'decision'
+  else if (id === 'checkin') currentView.value = 'checkin'
 }
 
 function backToTools() {
@@ -167,6 +179,63 @@ async function savePomodoroSettings(settings) {
     await window.api.writeData({ pomodoroSettings: toRaw(pomodoroSettings) })
   } catch (err) {
     console.error('保存番茄钟设置失败:', err)
+  }
+}
+
+// ---------- 打卡计划：新增 / 修改 / 删除 / 一键打卡 ----------
+function flashCheckinError(message) {
+  checkinError.value = message
+  clearTimeout(checkinErrorTimer)
+  checkinErrorTimer = setTimeout(() => (checkinError.value = ''), 3000)
+}
+
+async function saveCheckinPlan(plan) {
+  const list = toRaw(checkinPlans.value).map((p) => ({ ...p }))
+  const index = list.findIndex((p) => p.id === plan.id)
+  if (index >= 0) list[index] = plan
+  else list.push(plan)
+  try {
+    await window.api.writeData({ checkinPlans: list })
+    checkinPlans.value = list
+  } catch (err) {
+    console.error('保存打卡计划失败:', err)
+    flashCheckinError('⚠️ 打卡计划保存失败，请重试')
+  }
+}
+
+async function deleteCheckinPlan(id) {
+  const list = toRaw(checkinPlans.value).filter((p) => p.id !== id)
+  const logs = { ...toRaw(checkinLogs) }
+  delete logs[id]
+  try {
+    await window.api.writeData({ checkinPlans: list, checkinLogs: logs })
+    checkinPlans.value = list
+    delete checkinLogs[id]
+  } catch (err) {
+    console.error('删除打卡计划失败:', err)
+    flashCheckinError('⚠️ 删除失败，请重试')
+  }
+}
+
+// 一键打卡：以当前时间记录到 checkinLogs[planId][date][slotId]
+async function doCheckin({ planId, slotId, date }) {
+  const t = new Date()
+  const at = `${pad(t.getHours())}:${pad(t.getMinutes())}`
+  if (!checkinLogs[planId]) checkinLogs[planId] = {}
+  if (!checkinLogs[planId][date]) checkinLogs[planId][date] = {}
+  checkinLogs[planId][date][slotId] = { at, ts: t.getTime() }
+
+  const plan = checkinPlans.value.find((p) => p.id === planId)
+  const slot = plan ? (plan.slots || []).find((s) => s.id === slotId) : null
+  checkinTip.value = `✓ ${slot ? slot.name : '打卡'} 打卡成功（${at}）`
+  clearTimeout(checkinTipTimer)
+  checkinTipTimer = setTimeout(() => (checkinTip.value = ''), 2500)
+
+  try {
+    await window.api.writeData({ checkinLogs: toRaw(checkinLogs) })
+  } catch (err) {
+    console.error('保存打卡记录失败:', err)
+    flashCheckinError('⚠️ 打卡记录保存失败，请重试')
   }
 }
 
@@ -307,11 +376,30 @@ onMounted(async () => {
       pomodoroSettings.focusMinutes = Number(data.pomodoroSettings.focusMinutes) || 25
       pomodoroSettings.restMinutes = Number(data.pomodoroSettings.restMinutes) || 5
     }
+    if (Array.isArray(data.checkinPlans)) {
+      checkinPlans.value = data.checkinPlans
+    }
+    if (data.checkinLogs && typeof data.checkinLogs === 'object') {
+      Object.assign(checkinLogs, data.checkinLogs)
+    }
   }
   const rec = records[todayStr]
   todayDraft.completed = rec ? rec.completed : ''
   todayDraft.plan = rec ? rec.plan : ''
   selectDate(todayStr)
+
+  now.value = new Date()
+  clockTimer = setInterval(() => {
+    now.value = new Date()
+  }, 1000)
+})
+
+onUnmounted(() => {
+  clearInterval(clockTimer)
+  clearTimeout(savedTipTimer)
+  clearTimeout(apiKeySavedTimer)
+  clearTimeout(checkinTipTimer)
+  clearTimeout(checkinErrorTimer)
 })
 </script>
 
@@ -353,6 +441,19 @@ onMounted(async () => {
 
     <!-- 主内容区 -->
     <main class="flex flex-1 flex-col gap-6 overflow-y-auto px-8 py-6">
+      <!-- 今日打卡任务：到点显示一键打卡按钮（显示该时段打卡名称） -->
+      <CheckinToday
+        :plans="checkinPlans"
+        :logs="checkinLogs"
+        :now="now"
+        @checkin="doCheckin"
+        @open-plans="openTool('checkin')"
+      />
+      <transition name="fade">
+        <p v-if="checkinTip" class="-mt-4 text-center text-sm text-emerald-600">{{ checkinTip }}</p>
+        <p v-else-if="checkinError" class="-mt-4 text-center text-sm text-red-500">{{ checkinError }}</p>
+      </transition>
+
       <!-- 今日番茄钟统计 -->
       <section class="rounded-2xl border border-calm/30 bg-calm/10 px-5 py-3">
         <div class="mb-1 flex items-center gap-2">
@@ -411,8 +512,8 @@ onMounted(async () => {
       <div class="mt-auto">
         <div class="flex items-center gap-4">
           <button class="history-btn" @click="showHistory = true">📜 查看历史记录</button>
-          <button v-if="canEdit" class="save-btn" @click="saveToday">💾 保存今日打卡</button>
-          <button v-else class="save-btn save-btn-disabled" disabled>💾 保存今日打卡</button>
+          <button v-if="canEdit" class="save-btn" @click="saveToday">💾 保存今日打卡内容</button>
+          <button v-else class="save-btn save-btn-disabled" disabled>💾 保存今日打卡内容</button>
         </div>
 
         <transition name="fade">
@@ -604,6 +705,17 @@ onMounted(async () => {
       @select-tool="openTool"
     />
 
+    <!-- 打卡计划：管理 + 每个计划的统计图（全屏覆盖，从工具菜单进入） -->
+    <CheckinView
+      v-else-if="currentView === 'checkin'"
+      :plans="checkinPlans"
+      :logs="checkinLogs"
+      :today="todayKey"
+      @back="backToTools"
+      @save-plan="saveCheckinPlan"
+      @delete-plan="deleteCheckinPlan"
+    />
+
     <!-- 番茄钟（全屏覆盖） -->
     <PomodoroView
       v-else-if="currentView === 'pomodoro'"
@@ -624,6 +736,9 @@ onMounted(async () => {
 
     <!-- 查看新闻（全屏覆盖，从工具菜单进入） -->
     <NewsView v-else-if="currentView === 'news'" @back="backToTools" />
+
+    <!-- 做个决定（全屏覆盖，从工具菜单进入） -->
+    <DecisionView v-else-if="currentView === 'decision'" @back="backToTools" />
 
     <!-- 学习统计仪表盘（全屏覆盖，从历史记录进入） -->
     <StatsView

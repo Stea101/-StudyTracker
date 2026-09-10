@@ -21,7 +21,10 @@ async function ensureDataFile() {
           records: {},
           pomodoro: {},
           pomodoroSettings: { focusMinutes: 25, restMinutes: 5 },
-          newsApiKeyEnc: ''
+          newsApiKeyEnc: '',
+          decision: { templates: [], current: { question: '', answers: [] } },
+          checkinPlans: [],
+          checkinLogs: {}
         },
         null,
         2
@@ -29,6 +32,103 @@ async function ensureDataFile() {
       'utf-8'
     )
   }
+}
+
+// 「做个决定」数据归一化：自定义模板（最多 10 个，每项至少 2 个答案）+ 当前编辑中的决定
+function normalizeDecision(d) {
+  const templates = Array.isArray(d && d.templates)
+    ? d.templates
+        .filter(
+          (t) =>
+            t &&
+            typeof t === 'object' &&
+            typeof t.name === 'string' &&
+            t.name.trim() &&
+            Array.isArray(t.answers)
+        )
+        .map((t) => ({
+          id:
+            typeof t.id === 'string' && t.id
+              ? t.id
+              : `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: t.name.trim(),
+          answers: t.answers.map((a) => String(a).trim()).filter((a) => a.length > 0)
+        }))
+        .filter((t) => t.answers.length >= 2)
+        .slice(0, 10)
+    : []
+
+  const current =
+    d && d.current && typeof d.current === 'object'
+      ? {
+          question: typeof d.current.question === 'string' ? d.current.question : '',
+          answers: Array.isArray(d.current.answers)
+            ? d.current.answers.map((a) => String(a)).slice(0, 20)
+            : []
+        }
+      : { question: '', answers: [] }
+
+  return { templates, current }
+}
+
+// ---------- 打卡计划 / 打卡记录 数据归一化 ----------
+// 渲染进程是打卡计划的唯一写入方，这里只做防御性清洗：
+// 过滤明显的脏数据、补全缺失 id / 时间格式，避免手改 data.json 后界面崩溃。
+const REPEAT_IDS = ['daily', 'weekdays', 'workdays', 'weekends', 'custom']
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+const rnd = () => Math.random().toString(36).slice(2, 8)
+
+function normalizeCheckinPlans(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((p) => p && typeof p === 'object')
+    .map((p) => ({
+      id: typeof p.id === 'string' && p.id ? p.id : `plan-${Date.now()}-${rnd()}`,
+      name: typeof p.name === 'string' && p.name.trim() ? p.name.trim() : '未命名打卡计划',
+      repeat: REPEAT_IDS.includes(p.repeat) ? p.repeat : 'daily',
+      customDays: Array.isArray(p.customDays)
+        ? [...new Set(p.customDays.map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6))].sort(
+            (a, b) => a - b
+          )
+        : [1, 2, 3, 4, 5],
+      startDate: typeof p.startDate === 'string' && DATE_RE.test(p.startDate) ? p.startDate : '',
+      endDate: typeof p.endDate === 'string' && DATE_RE.test(p.endDate) ? p.endDate : '',
+      slots: (Array.isArray(p.slots) ? p.slots : [])
+        .filter((s) => s && typeof s === 'object')
+        .slice(0, 12)
+        .map((s) => ({
+          id: typeof s.id === 'string' && s.id ? s.id : `slot-${Date.now()}-${rnd()}`,
+          name: typeof s.name === 'string' ? s.name.trim() : '',
+          start: typeof s.start === 'string' && TIME_RE.test(s.start) ? s.start : '08:00',
+          end: typeof s.end === 'string' && TIME_RE.test(s.end) ? s.end : '09:00'
+        })),
+      createdAt: Number(p.createdAt) || 0
+    }))
+    .slice(0, 30)
+}
+
+function normalizeCheckinLogs(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const out = {}
+  for (const [planId, days] of Object.entries(value)) {
+    if (!planId || !days || typeof days !== 'object' || Array.isArray(days)) continue
+    const dayOut = {}
+    for (const [date, slots] of Object.entries(days)) {
+      if (!DATE_RE.test(date) || !slots || typeof slots !== 'object' || Array.isArray(slots)) continue
+      const slotOut = {}
+      for (const [slotId, rec] of Object.entries(slots)) {
+        if (!slotId || !rec || typeof rec !== 'object') continue
+        slotOut[slotId] = {
+          at: typeof rec.at === 'string' && TIME_RE.test(rec.at) ? rec.at : '',
+          ts: Number(rec.ts) || 0
+        }
+      }
+      if (Object.keys(slotOut).length) dayOut[date] = slotOut
+    }
+    if (Object.keys(dayOut).length) out[planId] = dayOut
+  }
+  return out
 }
 
 async function readData() {
@@ -53,7 +153,10 @@ async function readData() {
                   : 5
             }
           : { focusMinutes: 25, restMinutes: 5 },
-      newsApiKeyEnc: data && typeof data.newsApiKeyEnc === 'string' ? data.newsApiKeyEnc : ''
+      newsApiKeyEnc: data && typeof data.newsApiKeyEnc === 'string' ? data.newsApiKeyEnc : '',
+      decision: normalizeDecision(data),
+      checkinPlans: normalizeCheckinPlans(data && data.checkinPlans),
+      checkinLogs: normalizeCheckinLogs(data && data.checkinLogs)
     }
   } catch (err) {
     console.error('读取数据失败:', err)
@@ -62,7 +165,10 @@ async function readData() {
       records: {},
       pomodoro: {},
       pomodoroSettings: { focusMinutes: 25, restMinutes: 5 },
-      newsApiKeyEnc: ''
+      newsApiKeyEnc: '',
+      decision: { templates: [], current: { question: '', answers: [] } },
+      checkinPlans: [],
+      checkinLogs: {}
     }
   }
 }
@@ -81,7 +187,19 @@ async function writeData(data) {
         ? data.pomodoroSettings
         : current.pomodoroSettings,
     newsApiKeyEnc:
-      data && typeof data.newsApiKeyEnc === 'string' ? data.newsApiKeyEnc : current.newsApiKeyEnc
+      data && typeof data.newsApiKeyEnc === 'string' ? data.newsApiKeyEnc : current.newsApiKeyEnc,
+    decision:
+      data && data.decision && typeof data.decision === 'object'
+        ? data.decision
+        : current.decision,
+    checkinPlans:
+      data && Array.isArray(data.checkinPlans)
+        ? normalizeCheckinPlans(data.checkinPlans)
+        : current.checkinPlans,
+    checkinLogs:
+      data && data.checkinLogs && typeof data.checkinLogs === 'object'
+        ? normalizeCheckinLogs(data.checkinLogs)
+        : current.checkinLogs
   }
   // 先写临时文件再原子重命名，避免写入中断导致数据损坏
   const tmpFile = dataFile() + '.tmp'

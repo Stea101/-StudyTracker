@@ -8,8 +8,10 @@ const props = defineProps({
 const emit = defineEmits(['back', 'select-tool'])
 
 const tools = computed(() => [
+  { id: 'checkin', icon: '⏰', name: '打卡计划', desc: '设置每日打卡时段与重复规则，查看完成统计' },
   { id: 'pomodoro', icon: '🍅', name: '番茄钟', desc: '专注 / 休息计时器，可自定义时长' },
   { id: 'heatmap', icon: '📅', name: '日历热力图', desc: '按日期查看打卡与专注活跃度' },
+  { id: 'decision', icon: '🎡', name: '做个决定', desc: '随机转盘抽签，帮你做个决定' },
   props.newsEnabled
     ? { id: 'news', icon: '📰', name: '查看新闻', desc: '今日热搜新闻' }
     : { id: 'news', icon: '📰', name: '查看新闻', desc: '请先保存今日打卡后再查看', locked: true }
