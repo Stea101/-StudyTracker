@@ -59,6 +59,23 @@ npm run dev
 
 > `.npmrc` 已默认启用国内镜像下载 Electron 二进制；若你在境外网络，可注释掉 `.npmrc` 中两行镜像后重新 `npm install`。
 
+### 配置新闻 API 密钥（可选）
+
+「今日新闻」用万维易源 ShowAPI，需要你自己的 `appKey`。密钥**不写进源码、不进仓库**：
+
+```bash
+# 1. 复制模板
+copy .env.example .env      # macOS / Linux 用 cp .env.example .env
+
+# 2. 在 .env 里填入自己的 appKey
+SHOWAPI_KEY=你的appKey
+```
+
+- `.env` 已被 `.gitignore` 忽略，不会被提交；`.env.example` 只有空占位，可以提交。
+- 构建时 `electron.vite.config.mjs` 会把 `SHOWAPI_KEY` 注入主进程；也支持运行时用同名环境变量覆盖。
+- 不配置也能正常使用其它功能，只是「今日新闻」会提示你去「设置 → 新闻 API 密钥」里填写（填在设置里的密钥以 AES-256-GCM 密文存到 `data.json`，优先级高于 `.env`）。
+
+
 ## 打包为 Windows 可执行文件
 
 ```bash
@@ -148,5 +165,5 @@ npm run dist
 ## 新闻接口
 
 - 数据源：万维易源 ShowAPI，接口 `POST https://route.showapi.com/109-37?appKey=…`（热搜新闻）。
-- 默认密钥作为兜底保存在 `src/main/index.js` 的 `DEFAULT_SHOWAPI_KEY` 常量中；用户在「设置 → 新闻 API 密钥」保存的自定义密钥以密文形式存储于 `data.json`，并优先使用。
+- 默认密钥（可选）通过项目根的 `.env` 注入（见上文「配置新闻 API 密钥」），源码中没有硬编码密钥；用户在「设置 → 新闻 API 密钥」保存的自定义密钥以密文形式存储于 `data.json`，并优先使用。
 - 请求在**主进程**完成（渲染进程不直接访问网络），设置了 10 秒超时与完整的错误兜底；密钥完整值只在主进程内使用，渲染进程仅拿到脱敏后的首尾字符。

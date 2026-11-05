@@ -211,8 +211,14 @@ async function writeData(data) {
 }
 
 // ---------- 新闻 API 密钥（加密存储） ----------
-// 默认密钥：仅当用户尚未在设置中保存过自己的密钥时作为兜底使用
-const DEFAULT_SHOWAPI_KEY = ''
+// 默认密钥绝不硬编码在源码里：
+// 1. 构建期由 electron.vite.config.mjs 从项目根 .env 读取 SHOWAPI_KEY 并注入（.env 已被 .gitignore 忽略）；
+// 2. 也可在运行时用同名环境变量 SHOWAPI_KEY 覆盖（便于 CI / 免重新构建地更换密钥）。
+// 两者都没有时为 ""，此时「今日新闻」会提示用户去「设置 → 新闻 API 密钥」填写自己的密钥。
+const DEFAULT_SHOWAPI_KEY = (() => {
+  const injected = typeof __SHOWAPI_KEY__ === 'string' ? __SHOWAPI_KEY__.trim() : ''
+  return injected || (process.env.SHOWAPI_KEY || '').trim()
+})()
 
 // 本地静止数据加密：密钥持久化到 data.json 时以 AES-256-GCM 密文保存，
 // 避免明文密钥直接暴露在磁盘文件中（本机数据的轻度混淆防护）。
@@ -293,7 +299,11 @@ function requestHotNews(apiKey) {
 async function fetchHotNews() {
   try {
     const data = await readData()
-    const json = await requestHotNews(getEffectiveApiKey(data))
+    const apiKey = getEffectiveApiKey(data)
+    if (!apiKey) {
+      return { ok: false, error: '未配置新闻 API 密钥，请在「设置 → 新闻 API 密钥」中填写' }
+    }
+    const json = await requestHotNews(apiKey)
     if (json.showapi_res_code !== 0) {
       return { ok: false, error: json.showapi_res_error || '接口调用失败' }
     }
