@@ -45,8 +45,12 @@ const FEEDBACK_EMAIL = 'dev@example.com'
 const feedbackContent = ref('')
 const feedbackSending = ref(false)
 const feedbackSent = ref(false)
-const feedbackFailure = ref(null) // { reason, error, email, body }
+const feedbackFailure = ref(null) // { reason, error, email, body, clientName }
 const feedbackCopied = ref('') // 'email' | 'body' | ''
+// 每次发送前都让用户选一次邮件软件（Windows 会把 mailto 默认程序记住，不再询问）
+const mailPickerOpen = ref(false)
+const mailPickerLoading = ref(false)
+const mailClients = ref([]) // [{ id, name, exeName }]
 let feedbackSentTimer = null
 let feedbackCopiedTimer = null
 
@@ -285,6 +289,7 @@ function backToSettingsMenu() {
   settingsView.value = 'menu'
   showApiKeyEdit.value = false
   apiKeyError.value = ''
+  closeMailPicker()
 }
 
 async function openSettingOption(id) {
@@ -303,6 +308,7 @@ async function openSettingOption(id) {
     feedbackSent.value = false
     feedbackFailure.value = null
     feedbackCopied.value = ''
+    closeMailPicker()
   }
 }
 
@@ -347,15 +353,45 @@ function closeFeedbackFailure() {
   feedbackCopied.value = ''
 }
 
-// 一键拉起本机默认邮件客户端；失败时把邮箱抛给界面，提示用户手动发送
-async function sendFeedback() {
+function closeMailPicker() {
+  mailPickerOpen.value = false
+  mailClients.value = []
+}
+
+// 点击「一键发送反馈」：先枚举本机已安装的邮件软件，弹窗让用户每次自己选，
+// 避免 Windows 记住上次的 mailto 默认程序后不再询问。
+async function startSendFeedback() {
+  if (feedbackSending.value || mailPickerLoading.value) return
+  feedbackSent.value = false
+  feedbackFailure.value = null
+  feedbackCopied.value = ''
+  mailClients.value = []
+  mailPickerOpen.value = true
+  mailPickerLoading.value = true
+  try {
+    const list = await window.api.listMailClients()
+    mailClients.value = Array.isArray(list) ? list : []
+  } catch (err) {
+    console.error('获取本机邮件软件列表失败:', err)
+    mailClients.value = []
+  } finally {
+    mailPickerLoading.value = false
+  }
+}
+
+// 用用户本次选定的邮件软件发送（clientId 为 'default' 表示跟随系统默认）
+async function sendFeedbackWith(clientId) {
   if (feedbackSending.value) return
+  mailPickerOpen.value = false
   feedbackSending.value = true
   feedbackSent.value = false
   feedbackFailure.value = null
   feedbackCopied.value = ''
   try {
-    const result = await window.api.openFeedbackMail({ content: feedbackContent.value })
+    const result = await window.api.openFeedbackMail({
+      content: feedbackContent.value,
+      clientId
+    })
     if (result && result.ok) {
       feedbackSent.value = true
       clearTimeout(feedbackSentTimer)
@@ -365,7 +401,8 @@ async function sendFeedback() {
         reason: (result && result.reason) || 'open-failed',
         error: (result && result.error) || '',
         email: (result && result.email) || FEEDBACK_EMAIL,
-        body: (result && result.body) || feedbackContent.value
+        body: (result && result.body) || feedbackContent.value,
+        clientName: (result && result.clientName) || ''
       }
     }
   } catch (err) {
@@ -374,11 +411,33 @@ async function sendFeedback() {
       reason: 'open-failed',
       error: (err && err.message) || '',
       email: FEEDBACK_EMAIL,
-      body: feedbackContent.value
+      body: feedbackContent.value,
+      clientName: ''
     }
   } finally {
     feedbackSending.value = false
   }
+}
+
+// 失败窗口里的标题 / 说明文案（区分「没装邮件软件」「指定软件启动失败」等情况）
+function feedbackFailureTitle(failure) {
+  if (failure.reason === 'no-mail-client') return '⚠️ 没有检测到可用的邮件软件'
+  if (failure.reason === 'client-missing') return '⚠️ 选中的邮件软件已不可用'
+  if (failure.reason === 'client-launch-failed') return '⚠️ 启动邮件软件失败'
+  return '⚠️ 无法打开邮件软件'
+}
+
+function feedbackFailureDesc(failure) {
+  if (failure.reason === 'no-mail-client') {
+    return '没有检测到本机已安装并注册的邮件客户端。请手动把问题或建议发送到下面的开发者邮箱：'
+  }
+  if (failure.reason === 'client-missing') {
+    return '之前选择的邮件软件可能已被卸载，请重新选择。你也可以手动把问题或建议发送到下面的开发者邮箱：'
+  }
+  if (failure.reason === 'client-launch-failed') {
+    return `启动「${failure.clientName || '所选邮件软件'}」失败。你可以换一个邮件软件重试，或手动把问题或建议发送到下面的开发者邮箱：`
+  }
+  return '拉起邮件客户端失败。请手动把问题或建议发送到下面的开发者邮箱：'
 }
 
 async function loadApiKey() {
@@ -803,7 +862,10 @@ onUnmounted(() => {
           </div>
 
           <p class="mb-3 text-sm leading-relaxed text-ink/70">
-            把你在使用中发现的问题或建议写下来，点击下面的按钮会拉起本机默认的邮件软件，收件人已自动填好，确认内容后直接发送即可。
+            把你在使用中发现的问题或建议写下来，点击下面的按钮后会让你选择用哪个邮件软件发送（<span
+              class="text-ink/85"
+              >每次都会询问</span
+            >），收件人已自动填好，确认内容后直接发送即可。
           </p>
 
           <div class="mb-3 rounded-xl border border-oat-200 bg-oat-50 px-4 py-3">
@@ -829,15 +891,67 @@ onUnmounted(() => {
           <div class="mt-4 flex items-center gap-3">
             <button
               class="save-btn"
-              :disabled="feedbackSending"
-              :class="{ 'cursor-not-allowed opacity-60': feedbackSending }"
-              @click="sendFeedback"
+              :disabled="feedbackSending || mailPickerLoading"
+              :class="{ 'cursor-not-allowed opacity-60': feedbackSending || mailPickerLoading }"
+              @click="startSendFeedback"
             >
-              {{ feedbackSending ? '正在拉起邮件客户端…' : '📧 一键发送反馈' }}
+              {{ feedbackSending ? '正在拉起邮件软件…' : '📧 一键发送反馈' }}
             </button>
             <button class="history-btn" @click="backToSettingsMenu">关闭</button>
           </div>
         </template>
+      </div>
+    </div>
+
+    <!-- 问题反馈：每次发送前选择使用哪个邮件软件 -->
+    <div
+      v-if="mailPickerOpen"
+      class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-6"
+      @click.self="closeMailPicker"
+    >
+      <div class="flex max-h-[85%] w-full max-w-md flex-col rounded-2xl bg-white p-6 shadow-2xl">
+        <h3 class="mb-1 text-lg font-semibold">选择发送反馈的邮件软件</h3>
+        <p class="mb-4 text-sm text-ink/60">
+          每次发送都会询问你，方便随时更换；收件人固定为 {{ FEEDBACK_EMAIL }}。
+        </p>
+
+        <p v-if="mailPickerLoading" class="py-8 text-center text-sm text-ink/50">
+          正在检测本机已安装的邮件软件…
+        </p>
+
+        <div v-else class="flex flex-col gap-2 overflow-y-auto pr-1">
+          <button
+            class="flex items-center gap-3 rounded-xl border border-calm/50 bg-calm/5 p-3 text-left transition hover:bg-calm/10"
+            @click="sendFeedbackWith('default')"
+          >
+            <span class="text-2xl">🖥️</span>
+            <span class="min-w-0 flex-1">
+              <span class="block text-sm font-medium text-ink">使用系统默认的邮件软件</span>
+              <span class="block text-xs text-ink/50">跟随 Windows 的 mailto 默认设置</span>
+            </span>
+          </button>
+
+          <button
+            v-for="client in mailClients"
+            :key="client.id"
+            class="flex items-center gap-3 rounded-xl border border-oat-200 bg-white p-3 text-left transition hover:border-calm/50 hover:bg-calm/5"
+            @click="sendFeedbackWith(client.id)"
+          >
+            <span class="text-2xl">✉️</span>
+            <span class="min-w-0 flex-1">
+              <span class="block truncate text-sm font-medium text-ink">{{ client.name }}</span>
+              <span class="block truncate text-xs text-ink/50">{{ client.exeName }}</span>
+            </span>
+          </button>
+
+          <p v-if="!mailClients.length" class="mt-1 text-xs leading-relaxed text-ink/45">
+            未检测到其它已注册的邮件软件，点上面「使用系统默认的邮件软件」即可。
+          </p>
+        </div>
+
+        <div class="mt-4 flex">
+          <button class="history-btn w-full" @click="closeMailPicker">取消</button>
+        </div>
       </div>
     </div>
 
@@ -848,13 +962,11 @@ onUnmounted(() => {
       @click.self="closeFeedbackFailure"
     >
       <div class="max-h-[85%] w-full max-w-md overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
-        <h3 class="mb-2 text-lg font-semibold text-red-500">⚠️ 无法打开邮件软件</h3>
+        <h3 class="mb-2 text-lg font-semibold text-red-500">
+          {{ feedbackFailureTitle(feedbackFailure) }}
+        </h3>
         <p class="mb-4 text-sm leading-relaxed text-ink/70">
-          {{
-            feedbackFailure.reason === 'no-mail-client'
-              ? '没有检测到本机已安装并注册的邮件客户端。'
-              : '拉起邮件客户端失败。'
-          }}请手动把问题或建议发送到下面的开发者邮箱：
+          {{ feedbackFailureDesc(feedbackFailure) }}
         </p>
 
         <div class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
@@ -869,9 +981,7 @@ onUnmounted(() => {
           <button class="history-btn" @click="copyText(feedbackFailure.body, 'body')">
             {{ feedbackCopied === 'body' ? '✓ 已复制' : '📋 复制邮件内容' }}
           </button>
-          <button class="history-btn" :disabled="feedbackSending" @click="sendFeedback">
-            🔄 重试
-          </button>
+          <button class="history-btn" @click="startSendFeedback">🔄 换个软件重试</button>
         </div>
 
         <p v-if="feedbackFailure.error" class="mt-3 text-xs text-ink/40">

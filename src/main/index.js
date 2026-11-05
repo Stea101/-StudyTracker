@@ -1,8 +1,8 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
-import { join } from 'path'
-import { promises as fs } from 'fs'
+import { join, basename } from 'path'
+import { promises as fs, existsSync } from 'fs'
 import { request as httpsRequest } from 'https'
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { release as osRelease } from 'os'
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto'
 
@@ -372,11 +372,272 @@ function buildMailtoUrl(to, subject, body) {
   return `mailto:${to}${parts.length ? `?${parts.join('&')}` : ''}`
 }
 
+// ---------- 枚举本机已安装的邮件客户端 ----------
+// Windows 把已注册的邮件客户端登记在注册表 Clients\Mail 下（每个客户端带一条
+// shell\open\command 命令行模板，%1 即 mailto 链接）。枚举出来后由用户每次自行选择，
+// 从而绕开「Windows 会把 mailto 默认程序记住、之后不再询问」的限制。
+let lastMailClients = []
+
+// PowerShell 脚本：以 UTF-8 输出 JSON，避免中文客户端名称乱码。
+// 两个来源合并（顺序很重要：先取传统注册方式，它的显示名更干净）：
+//   1) Clients\Mail\<客户端>\Protocols\mailto\shell\open\command —— 传统邮件客户端注册
+//   2) RegisteredApplications -> Capabilities\URLAssociations\mailto -> ProgId 的
+//      shell\open\command —— 现代注册方式（浏览器等也在这里，可用于网页邮箱）
+const PS_LIST_MAIL_CLIENTS = `
+$ErrorActionPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$list = New-Object System.Collections.ArrayList
+
+function Add-Entry($name, $command) {
+  if ([string]::IsNullOrWhiteSpace($command)) { return }
+  # 跳过 rundll32 之类的系统垫片：它们不是用户可感知的邮件软件
+  if ($command -match '(?i)rundll32\\.exe') { return }
+  $null = $list.Add([pscustomobject]@{ name = "$name"; command = "$command" })
+}
+
+# 1) 传统注册方式
+foreach ($root in @('HKLM:\\SOFTWARE\\Clients\\Mail','HKCU:\\SOFTWARE\\Clients\\Mail','HKLM:\\SOFTWARE\\WOW6432Node\\Clients\\Mail')) {
+  if (-not (Test-Path -LiteralPath $root)) { continue }
+  foreach ($item in @(Get-ChildItem -LiteralPath $root)) {
+    $cmdPath = $item.PSPath + '\\Protocols\\mailto\\shell\\open\\command'
+    if (-not (Test-Path -LiteralPath $cmdPath)) { continue }
+    $cmd = (Get-Item -LiteralPath $cmdPath).GetValue('')
+    $display = (Get-Item -LiteralPath $item.PSPath).GetValue('')
+    if ([string]::IsNullOrWhiteSpace($display)) { $display = $item.PSChildName }
+    Add-Entry $display $cmd
+  }
+}
+
+# 2) 现代注册方式
+foreach ($appName in (Get-Item -LiteralPath 'HKLM:\\SOFTWARE\\RegisteredApplications').GetValueNames()) {
+  $cap = (Get-Item -LiteralPath 'HKLM:\\SOFTWARE\\RegisteredApplications').GetValue($appName)
+  if ([string]::IsNullOrWhiteSpace($cap)) { continue }
+  $assoc = "HKLM:\\$cap\\URLAssociations"
+  if (-not (Test-Path -LiteralPath $assoc)) { continue }
+  $progId = (Get-ItemProperty -LiteralPath $assoc).mailto
+  if ([string]::IsNullOrWhiteSpace($progId)) { continue }
+  $cmdKey = "Registry::HKEY_CLASSES_ROOT\\$progId\\shell\\open\\command"
+  if (-not (Test-Path -LiteralPath $cmdKey)) { continue }
+  $cmd = (Get-Item -LiteralPath $cmdKey).GetValue('')
+  $display = (Get-ItemProperty -LiteralPath "HKLM:\\$cap" -Name 'ApplicationName').ApplicationName
+  # ApplicationName 可能是 @dll,-123 形式的间接资源串，这种就用注册项名字兜底
+  if ([string]::IsNullOrWhiteSpace($display) -or $display.StartsWith('@')) { $display = $appName }
+  Add-Entry $display $cmd
+}
+
+ConvertTo-Json -InputObject @($list) -Compress -Depth 4
+`
+
+function runPowerShell(script, timeout = 20000) {
+  return new Promise((resolve, reject) => {
+    const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    const options = {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout,
+      maxBuffer: 4 * 1024 * 1024
+    }
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+      options,
+      (err, stdout) => {
+        if (err && err.code === 'ENOENT') {
+          // 极少数环境只装了 PowerShell 7
+          execFile(
+            'pwsh.exe',
+            ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+            options,
+            (err2, stdout2) => (err2 ? reject(err2) : resolve(stdout2))
+          )
+          return
+        }
+        if (err) return reject(err)
+        resolve(stdout)
+      }
+    )
+  })
+}
+
+// 展开命令行模板里的 %SystemRoot% 之类环境变量
+function expandEnvVars(text) {
+  return String(text).replace(/%([^%]+)%/g, (whole, name) => {
+    const key = Object.keys(process.env).find((k) => k.toLowerCase() === String(name).toLowerCase())
+    return key ? process.env[key] : whole
+  })
+}
+
+// 解析注册表里的命令行模板，例如：
+//   "C:\Program Files\...\OUTLOOK.EXE" -c IPM.Note /mailto "%1"
+// 拆成 { exe, args }，参数中的引号会被去掉，交给 spawn 重新做转义
+function parseCommandTemplate(template) {
+  const text = expandEnvVars(String(template || '').trim())
+  if (!text) return null
+  let exe = ''
+  let rest = ''
+  if (text.startsWith('"')) {
+    const end = text.indexOf('"', 1)
+    if (end === -1) return null
+    exe = text.slice(1, end)
+    rest = text.slice(end + 1).trim()
+  } else {
+    const sp = text.search(/\s/)
+    if (sp === -1) {
+      exe = text
+    } else {
+      exe = text.slice(0, sp)
+      rest = text.slice(sp + 1).trim()
+    }
+  }
+  if (!exe) return null
+  const args = []
+  const re = /"([^"]*)"|(\S+)/g
+  let m
+  while ((m = re.exec(rest)) !== null) args.push(m[1] !== undefined ? m[1] : m[2])
+  return { exe, args }
+}
+
+// 把 mailto 链接填进参数模板；模板里没有 %1 这类占位符时追加到末尾
+function buildClientArgs(args, url) {
+  const out = []
+  let filled = false
+  for (const raw of args) {
+    if (/%[1lL]/.test(raw)) {
+      filled = true
+      out.push(raw.replace(/%[1lL]/g, () => url))
+    } else {
+      out.push(raw)
+    }
+  }
+  if (!filled) out.push(url)
+  return out
+}
+
+// 「@dll,-123」这类间接资源串不适合直接展示给用户
+function isIndirectName(name) {
+  const text = String(name || '').trim()
+  if (!text) return true
+  return text.startsWith('@') || /\.Application\.\d+$/i.test(text)
+}
+
+async function queryMailClients() {  if (process.platform !== 'win32') return []
+  let stdout = ''
+  try {
+    stdout = await runPowerShell(PS_LIST_MAIL_CLIENTS)
+  } catch (err) {
+    console.error('枚举本机邮件客户端失败:', err)
+    return []
+  }
+  const text = String(stdout || '').trim()
+  if (!text) return []
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return []
+  }
+  const seen = new Map()
+  const clients = []
+  for (const item of Array.isArray(parsed) ? parsed : [parsed]) {
+    if (!item || typeof item.command !== 'string' || !item.command.trim()) continue
+    const parsedCmd = parseCommandTemplate(item.command)
+    if (!parsedCmd) continue
+    // 程序已被卸载 / 路径失效的注册项直接跳过
+    if (process.platform === 'win32' && !existsSync(parsedCmd.exe)) continue
+    const name = String(item.name || '').trim() || basename(parsedCmd.exe, '.exe')
+    // 同一个程序可能被多个注册方式重复登记，按命令行去重
+    const dedupeKey = `${parsedCmd.exe.toLowerCase()}|${parsedCmd.args.join(' ').toLowerCase()}`
+    if (seen.has(dedupeKey)) {
+      // 名称更干净的那条胜出（避免显示成 @dll,-123 这类间接资源串）
+      const existing = clients[seen.get(dedupeKey)]
+      if (existing && isIndirectName(existing.name) && !isIndirectName(name)) existing.name = name
+      continue
+    }
+    seen.set(dedupeKey, clients.length)
+    clients.push({
+      id: `mail-${clients.length}`,
+      name,
+      exeName: basename(parsedCmd.exe),
+      command: item.command
+    })
+  }
+  return clients
+}
+
+async function listMailClients() {
+  lastMailClients = await queryMailClients()
+  return lastMailClients
+}
+
+// 用指定客户端启动邮件撰写窗口（不走系统默认程序，因此不受「记住上次选择」影响）
+function launchMailClient(client, url) {
+  return new Promise((resolve, reject) => {
+    const parsed = parseCommandTemplate(client.command)
+    if (!parsed) return reject(new Error('邮件软件的命令行无法解析'))
+    if (process.platform === 'win32' && !existsSync(parsed.exe)) {
+      return reject(new Error(`未找到邮件软件程序：${parsed.exe}`))
+    }
+    const args = buildClientArgs(parsed.args, url)
+    let child
+    try {
+      child = spawn(parsed.exe, args, { detached: true, stdio: 'ignore' })
+    } catch (err) {
+      return reject(err)
+    }
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try {
+        child.unref()
+      } catch {
+        /* ignore */
+      }
+      resolve()
+    }, 4000)
+    child.once('error', (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reject(err)
+    })
+    child.once('spawn', () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.unref()
+      resolve()
+    })
+  })
+}
+
 async function openFeedbackMail(payload) {
   const raw = payload && typeof payload.content === 'string' ? payload.content : ''
   const content = raw.slice(0, 4000)
+  const clientId = payload && typeof payload.clientId === 'string' ? payload.clientId : 'default'
   const body = composeFeedbackBody(content)
   const url = buildMailtoUrl(FEEDBACK_EMAIL, '【极简学习打卡器】问题反馈', body)
+
+  // 用户明确指定了某个邮件软件：直接用该软件打开，每次都按用户当次的选择执行
+  if (clientId !== 'default') {
+    const client = lastMailClients.find((c) => c.id === clientId)
+    if (!client) {
+      return { ok: false, reason: 'client-missing', email: FEEDBACK_EMAIL, body }
+    }
+    try {
+      await launchMailClient(client, url)
+      return { ok: true, email: FEEDBACK_EMAIL, body, clientName: client.name }
+    } catch (err) {
+      return {
+        ok: false,
+        reason: 'client-launch-failed',
+        error: (err && err.message) || '未知错误',
+        email: FEEDBACK_EMAIL,
+        body,
+        clientName: client.name
+      }
+    }
+  }
 
   if (!(await hasMailtoHandler())) {
     return { ok: false, reason: 'no-mail-client', email: FEEDBACK_EMAIL, body }
@@ -457,6 +718,9 @@ app.whenReady().then(() => {
 
   // 设置 → 问题反馈：一键拉起系统默认邮件客户端，收件人预填开发者邮箱
   ipcMain.handle('feedback:openMail', (_event, payload) => openFeedbackMail(payload))
+
+  // 设置 → 问题反馈：枚举本机已安装的邮件客户端（供每次发送前的选择窗口使用）
+  ipcMain.handle('feedback:listMailClients', () => listMailClients())
 
   createWindow()
 

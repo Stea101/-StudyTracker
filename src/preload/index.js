@@ -8,7 +8,8 @@ const api = {
   openExternal: (url) => ipcRenderer.invoke('news:open', url),
   getApiKey: () => ipcRenderer.invoke('settings:getApiKey'),
   saveApiKey: (key) => ipcRenderer.invoke('settings:saveApiKey', key),
-  openFeedbackMail: (payload) => ipcRenderer.invoke('feedback:openMail', payload)
+  openFeedbackMail: (payload) => ipcRenderer.invoke('feedback:openMail', payload),
+  listMailClients: () => ipcRenderer.invoke('feedback:listMailClients')
 }
 
 contextBridge.exposeInMainWorld('api', api)
