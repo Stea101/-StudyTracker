@@ -9,7 +9,8 @@ const api = {
   getApiKey: () => ipcRenderer.invoke('settings:getApiKey'),
   saveApiKey: (key) => ipcRenderer.invoke('settings:saveApiKey', key),
   openFeedbackMail: (payload) => ipcRenderer.invoke('feedback:openMail', payload),
-  listMailClients: () => ipcRenderer.invoke('feedback:listMailClients')
+  listMailClients: () => ipcRenderer.invoke('feedback:listMailClients'),
+  getFeedbackEmail: () => ipcRenderer.invoke('feedback:getEmail')
 }
 
 contextBridge.exposeInMainWorld('api', api)

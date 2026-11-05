@@ -41,7 +41,8 @@ const apiKeySaved = ref(false)
 let apiKeySavedTimer = null
 
 // ---------- 设置 · 问题反馈 ----------
-const FEEDBACK_EMAIL = 'dev@example.com'
+// 开发者邮箱不写死在代码里：由主进程从 .env 读取后经 IPC 提供，未配置时为空字符串
+const feedbackEmail = ref('')
 const feedbackContent = ref('')
 const feedbackSending = ref(false)
 const feedbackSent = ref(false)
@@ -400,7 +401,7 @@ async function sendFeedbackWith(clientId) {
       feedbackFailure.value = {
         reason: (result && result.reason) || 'open-failed',
         error: (result && result.error) || '',
-        email: (result && result.email) || FEEDBACK_EMAIL,
+        email: (result && result.email) || feedbackEmail.value,
         body: (result && result.body) || feedbackContent.value,
         clientName: (result && result.clientName) || ''
       }
@@ -410,7 +411,7 @@ async function sendFeedbackWith(clientId) {
     feedbackFailure.value = {
       reason: 'open-failed',
       error: (err && err.message) || '',
-      email: FEEDBACK_EMAIL,
+      email: feedbackEmail.value,
       body: feedbackContent.value,
       clientName: ''
     }
@@ -421,6 +422,7 @@ async function sendFeedbackWith(clientId) {
 
 // 失败窗口里的标题 / 说明文案（区分「没装邮件软件」「指定软件启动失败」等情况）
 function feedbackFailureTitle(failure) {
+  if (failure.reason === 'not-configured') return '⚠️ 本版本未配置反馈邮箱'
   if (failure.reason === 'no-mail-client') return '⚠️ 没有检测到可用的邮件软件'
   if (failure.reason === 'client-missing') return '⚠️ 选中的邮件软件已不可用'
   if (failure.reason === 'client-launch-failed') return '⚠️ 启动邮件软件失败'
@@ -428,6 +430,9 @@ function feedbackFailureTitle(failure) {
 }
 
 function feedbackFailureDesc(failure) {
+  if (failure.reason === 'not-configured') {
+    return '当前构建没有配置开发者邮箱，无法一键发送。请到项目仓库的 Issues 页面提交问题或建议，并附上下面的邮件内容。'
+  }
   if (failure.reason === 'no-mail-client') {
     return '没有检测到本机已安装并注册的邮件客户端。请手动把问题或建议发送到下面的开发者邮箱：'
   }
@@ -514,6 +519,13 @@ watch([completed, plan], () => {
 
 // ---------- 初始化 ----------
 onMounted(async () => {
+  try {
+    const info = await window.api.getFeedbackEmail()
+    feedbackEmail.value = (info && info.email) || ''
+  } catch (err) {
+    console.error('读取反馈邮箱失败:', err)
+    feedbackEmail.value = ''
+  }
   const data = await window.api.readData()
   if (data) {
     motto.value = data.motto || ''
@@ -868,9 +880,14 @@ onUnmounted(() => {
             >），收件人已自动填好，确认内容后直接发送即可。
           </p>
 
-          <div class="mb-3 rounded-xl border border-oat-200 bg-oat-50 px-4 py-3">
+          <div v-if="feedbackEmail" class="mb-3 rounded-xl border border-oat-200 bg-oat-50 px-4 py-3">
             <p class="mb-1 text-xs text-ink/50">收件人（开发者邮箱）</p>
-            <p class="select-text break-all font-mono text-base text-ink">{{ FEEDBACK_EMAIL }}</p>
+            <p class="select-text break-all font-mono text-base text-ink">{{ feedbackEmail }}</p>
+          </div>
+          <div v-else class="mb-3 rounded-xl border border-oat-200 bg-oat-50 px-4 py-3">
+            <p class="text-xs leading-relaxed text-ink/60">
+              当前构建未配置开发者邮箱，无法一键发送邮件；请到项目仓库的 Issues 页面提交问题或建议。
+            </p>
           </div>
 
           <textarea
@@ -891,8 +908,10 @@ onUnmounted(() => {
           <div class="mt-4 flex items-center gap-3">
             <button
               class="save-btn"
-              :disabled="feedbackSending || mailPickerLoading"
-              :class="{ 'cursor-not-allowed opacity-60': feedbackSending || mailPickerLoading }"
+              :disabled="feedbackSending || mailPickerLoading || !feedbackEmail"
+              :class="{
+                'cursor-not-allowed opacity-60': feedbackSending || mailPickerLoading || !feedbackEmail
+              }"
               @click="startSendFeedback"
             >
               {{ feedbackSending ? '正在拉起邮件软件…' : '📧 一键发送反馈' }}
@@ -912,7 +931,7 @@ onUnmounted(() => {
       <div class="flex max-h-[85%] w-full max-w-md flex-col rounded-2xl bg-white p-6 shadow-2xl">
         <h3 class="mb-1 text-lg font-semibold">选择发送反馈的邮件软件</h3>
         <p class="mb-4 text-sm text-ink/60">
-          每次发送都会询问你，方便随时更换；收件人固定为 {{ FEEDBACK_EMAIL }}。
+          每次发送都会询问你，方便随时更换。<template v-if="feedbackEmail">收件人固定为 {{ feedbackEmail }}。</template>
         </p>
 
         <p v-if="mailPickerLoading" class="py-8 text-center text-sm text-ink/50">
@@ -969,26 +988,42 @@ onUnmounted(() => {
           {{ feedbackFailureDesc(feedbackFailure) }}
         </p>
 
-        <div class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+        <div
+          v-if="feedbackFailure.email"
+          class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3"
+        >
           <p class="mb-1 text-xs text-ink/50">开发者邮箱</p>
           <p class="select-text break-all font-mono text-xl text-ink">{{ feedbackFailure.email }}</p>
         </div>
 
         <div class="flex flex-wrap items-center gap-2">
-          <button class="nav-btn-primary" @click="copyText(feedbackFailure.email, 'email')">
+          <button
+            v-if="feedbackFailure.email"
+            class="nav-btn-primary"
+            @click="copyText(feedbackFailure.email, 'email')"
+          >
             {{ feedbackCopied === 'email' ? '✓ 已复制' : '📋 复制邮箱地址' }}
           </button>
           <button class="history-btn" @click="copyText(feedbackFailure.body, 'body')">
             {{ feedbackCopied === 'body' ? '✓ 已复制' : '📋 复制邮件内容' }}
           </button>
-          <button class="history-btn" @click="startSendFeedback">🔄 换个软件重试</button>
+          <button
+            v-if="feedbackFailure.reason !== 'not-configured'"
+            class="history-btn"
+            @click="startSendFeedback"
+          >
+            🔄 换个软件重试
+          </button>
         </div>
 
         <p v-if="feedbackFailure.error" class="mt-3 text-xs text-ink/40">
           失败原因：{{ feedbackFailure.error }}
         </p>
-        <p class="mt-3 text-xs leading-relaxed text-ink/50">
+        <p v-if="feedbackFailure.email" class="mt-3 text-xs leading-relaxed text-ink/50">
           提示：你可以复制上面的邮箱地址，然后用任意邮箱（网页版邮箱、手机邮箱 App 等）自行发送建议给开发者。
+        </p>
+        <p v-else class="mt-3 text-xs leading-relaxed text-ink/50">
+          提示：请复制上面的邮件内容，粘贴到项目仓库的 Issue 里。
         </p>
 
         <div class="mt-4 flex">

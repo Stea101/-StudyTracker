@@ -324,8 +324,12 @@ async function fetchHotNews() {
 }
 
 // ---------- 问题反馈（拉取系统默认邮件客户端） ----------
-// 开发者邮箱：反馈邮件的收件人，同时作为拉起失败时展示给用户的兜底信息
-const FEEDBACK_EMAIL = 'dev@example.com'
+// 开发者邮箱同样不硬编码在源码里：构建期由 electron.vite.config.mjs 从 .env 读取 FEEDBACK_EMAIL 注入，
+// 运行时也可用同名环境变量覆盖。未配置时为空字符串，界面会引导用户改用仓库 Issues 反馈。
+const FEEDBACK_EMAIL = (() => {
+  const injected = typeof __FEEDBACK_EMAIL__ === 'string' ? __FEEDBACK_EMAIL__.trim() : ''
+  return injected || (process.env.FEEDBACK_EMAIL || '').trim()
+})()
 
 function pad2(n) {
   return String(n).padStart(2, '0')
@@ -626,6 +630,10 @@ async function openFeedbackMail(payload) {
   const content = raw.slice(0, 4000)
   const clientId = payload && typeof payload.clientId === 'string' ? payload.clientId : 'default'
   const body = composeFeedbackBody(content)
+  // 没有配置反馈邮箱时不弹邮件软件，直接把「改为提交 Issue」的引导返回给界面
+  if (!FEEDBACK_EMAIL) {
+    return { ok: false, reason: 'not-configured', email: '', body }
+  }
   const url = buildMailtoUrl(FEEDBACK_EMAIL, '【极简学习打卡器】问题反馈', body)
 
   // 用户明确指定了某个邮件软件：直接用该软件打开，每次都按用户当次的选择执行
@@ -731,6 +739,9 @@ app.whenReady().then(() => {
 
   // 设置 → 问题反馈：枚举本机已安装的邮件客户端（供每次发送前的选择窗口使用）
   ipcMain.handle('feedback:listMailClients', () => listMailClients())
+
+  // 设置 → 问题反馈：把当前构建配置的开发者邮箱交给界面显示（未配置时为空字符串）
+  ipcMain.handle('feedback:getEmail', () => ({ email: FEEDBACK_EMAIL }))
 
   createWindow()
 
